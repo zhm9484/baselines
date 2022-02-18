@@ -18,7 +18,7 @@ from scripted import baselines
 from demos import minimal
 
 
-class Base(nmmo.config.Small):
+class Base(nmmo.config.Medium):
     '''Base environment: empty map with agents'''
     PLAYERS = [baselines.Explore]
 
@@ -57,7 +57,7 @@ def get_config(name):
         raise
 
 def summary(logs):
-    stats = logs['Stats']
+    stats = logs['Player']
 
     for key, vals in stats.items():
         print(f'{key}: {min(vals)}, {np.mean(vals)}, {max(vals)}')
