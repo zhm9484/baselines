@@ -80,6 +80,7 @@ class RLlib:
 
    #Model
    SCRIPTED                = None
+   SPECIALIZE              = True
    PLAYER_N_OBS            = 100
    NPOLICIES               = 1
    HIDDEN                  = 64

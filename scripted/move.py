@@ -240,7 +240,7 @@ def gatherBFS(config, ob, actions, resource, cutoff=100):
             matl     = nmmo.scripting.Observation.attribute(tile, Tile.Index)
             occupied = nmmo.scripting.Observation.attribute(tile, Tile.NEnts)
 
-            if resource.index == material.Fish.index == matl:
+            if material.Fish in resource and material.Fish.index == matl:
                 found = nxt
                 backtrace[nxt] = cur
                 break
@@ -248,7 +248,7 @@ def gatherBFS(config, ob, actions, resource, cutoff=100):
             if not vacant(tile):
                 continue
 
-            if matl == resource.index:
+            if matl in (e.index for e in resource):
                 found = nxt
                 backtrace[nxt] = cur
                 break

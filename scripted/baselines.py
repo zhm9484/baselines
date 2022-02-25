@@ -1,6 +1,7 @@
 from pdb import set_trace as T
 from collections import defaultdict
 import numpy as np
+import random
 
 import nmmo
 from nmmo import scripting, material, Serialized
@@ -82,19 +83,8 @@ class Scripted(nmmo.Agent):
         '''Attack the current target'''
         if self.target is not None:
            assert self.targetID is not None
-           attack.target(self.config, self.actions, self.style, self.targetID)
-
-    def select_combat_style(self):
-       '''Select a combat style based on distance from the current target'''
-       if self.target is None:
-          return
-
-       if self.targetDist <= self.config.COMBAT_MELEE_REACH:
-          self.style = Action.Melee
-       elif self.targetDist <= self.config.COMBAT_RANGE_REACH:
-          self.style = Action.Range
-       else:
-          self.style = Action.Mage
+           style = random.choice(self.style)
+           attack.target(self.config, self.actions, style, self.targetID)
 
     def target_weak(self):
         '''Target the nearest agent if it is weak'''
@@ -413,6 +403,10 @@ class Forage(Scripted):
 
 class Combat(Scripted):
     '''Forages, fights, and explores'''
+    def __init__(self, config, idx):
+        super().__init__(config, idx)
+        self.style  = [Action.Melee, Action.Range, Action.Mage]
+
     @property
     def supplies(self):
         return {item.Ration: 2, item.Poultice: 2, self.ammo: 10}
@@ -433,6 +427,10 @@ class Combat(Scripted):
 
 class Gather(Scripted):
     '''Forages, fights, and explores'''
+    def __init__(self, config, idx):
+        super().__init__(config, idx)
+        self.resource = [material.Fish, material.Herb, material.Ore, material.Tree, material.Crystal]
+
     @property
     def supplies(self):
         return {item.Ration: 2, item.Poultice: 2}
@@ -456,52 +454,60 @@ class Gather(Scripted):
 class Fisher(Gather):
     def __init__(self, config, idx):
         super().__init__(config, idx)
-        self.resource = material.Fish
+        if config.SPECIALIZE:
+            self.resource = [material.Fish]
         self.tool     = item.Rod
 
 class Herbalist(Gather):
     def __init__(self, config, idx):
         super().__init__(config, idx)
-        self.resource = material.Herb
+        if config.SPECIALIZE:
+            self.resource = [material.Herb]
         self.tool     = item.Gloves
 
 class Prospector(Gather):
     def __init__(self, config, idx):
         super().__init__(config, idx)
-        self.resource = material.Ore
+        if config.SPECIALIZE:
+            self.resource = [material.Ore]
         self.tool     = item.Pickaxe
 
 class Carver(Gather):
     def __init__(self, config, idx):
         super().__init__(config, idx)
-        self.resource = material.Tree
+        if config.SPECIALIZE:
+            self.resource = [material.Tree]
         self.tool     = item.Chisel
 
 class Alchemist(Gather):
     def __init__(self, config, idx):
         super().__init__(config, idx)
-        self.resource = material.Crystal
+        if config.SPECIALIZE:
+            self.resource = [material.Crystal]
         self.tool     = item.Arcane
 
 class Melee(Combat):
     def __init__(self, config, idx):
         super().__init__(config, idx)
+        if config.SPECIALIZE:
+            self.style  = [Action.Melee]
         self.weapon = item.Sword
-        self.style  = Action.Melee
         self.ammo   = item.Scrap
 
 class Range(Combat):
     def __init__(self, config, idx):
         super().__init__(config, idx)
+        if config.SPECIALIZE:
+            self.style  = [Action.Range]
         self.weapon = item.Bow
-        self.style  = Action.Range
         self.ammo   = item.Shaving
 
 class Mage(Combat):
     def __init__(self, config, idx):
         super().__init__(config, idx)
+        if config.SPECIALIZE:
+            self.style  = [Action.Mage]
         self.weapon = item.Wand
-        self.style  = Action.Mage
         self.ammo   = item.Shard
 
 
