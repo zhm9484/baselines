@@ -42,84 +42,10 @@ def run_tune_experiment(config, trainer_wrapper, rllib_env=wrapper.RLlibEnv):
    Setup custom environment, observations/actions, policies,
    and parallel training/evaluation'''
 
-   #Round and round the num_threads flags go
-   #Which are needed nobody knows!
-   torch.set_num_threads(1)
-   os.environ['MKL_NUM_THREADS']     = '1'
-   os.environ['OMP_NUM_THREADS']     = '1'
-   os.environ['NUMEXPR_NUM_THREADS'] = '1'
- 
-   ray.init(local_mode=config.LOCAL_MODE)
-
-   #Register custom env and policies
-   ray.tune.registry.register_env("Neural_MMO",
-         lambda config: rllib_env(config))
-
-   rllib.models.ModelCatalog.register_custom_model(
-         'godsword', wrapper.RLlibPolicy)
-
-   mapPolicy = lambda agentID : 'policy_{}'.format(
-         agentID % config.NPOLICIES)
-
-   policies = {}
-   env = nmmo.Env(config)
-   for i in range(config.NPOLICIES):
-      params = {
-            "agent_id": i,
-            "obs_space_dict": env.observation_space(i),
-            "act_space_dict": env.action_space(i)}
-      key           = mapPolicy(i)
-      policies[key] = (None, env.observation_space(i), env.action_space(i), params)
-
-   #Evaluation config
-   eval_config = deepcopy(config)
-   eval_config.EVALUATE = True
-   eval_config.AGENTS   = eval_config.EVAL_AGENTS
-
    trainer_cls, extra_config = trainer_wrapper(config)
 
-   #Create rllib config
-   rllib_config = {
-      'num_workers': config.NUM_WORKERS,
-      'num_gpus_per_worker': config.NUM_GPUS_PER_WORKER,
-      'num_gpus': config.NUM_GPUS,
-      'num_envs_per_worker': 1,
-      'simple_optimizer': True,
-      'train_batch_size': config.TRAIN_BATCH_SIZE,
-      'rollout_fragment_length': config.ROLLOUT_FRAGMENT_LENGTH,
-      'num_sgd_iter': config.NUM_SGD_ITER,
-      'framework': 'torch',
-      'horizon': np.inf,
-      'soft_horizon': False, 
-      'no_done_at_end': False,
-      'env': 'Neural_MMO',
-      'env_config': {
-         'config': config
-      },
-      'evaluation_config': {
-         'env_config': {
-            'config': eval_config
-         },
-      },
-      'multiagent': {
-         'policies': policies,
-         'policy_mapping_fn': mapPolicy,
-         'count_steps_by': 'agent_steps'
-      },
-      'model': {
-         'custom_model': 'godsword',
-         'custom_model_config': {'config': config},
-         'max_seq_len': config.LSTM_BPTT_HORIZON
-      },
-      'render_env': config.RENDER,
-      'callbacks': wrapper.RLlibLogCallbacks,
-      'evaluation_interval': config.EVALUATION_INTERVAL,
-      'evaluation_num_episodes': config.EVALUATION_NUM_EPISODES,
-      'evaluation_num_workers': config.EVALUATION_NUM_WORKERS,
-      'evaluation_parallel_to_training': config.EVALUATION_PARALLEL,
-   }
-
    #Alg-specific params
+   rllib_config = wrapper.build_rllib_config(config, rllib_env)
    rllib_config = {**rllib_config, **extra_config}
  
    restore     = None

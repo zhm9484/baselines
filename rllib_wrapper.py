@@ -1,15 +1,11 @@
-from pdb import set_trace as T
 import numpy as np
 
 from collections import defaultdict
 
 from tqdm import tqdm
-import gym
-import wandb
 
 import torch
 from torch import nn
-from torch.nn.utils import rnn
 
 from ray import rllib
 from ray.rllib.agents.callbacks import DefaultCallbacks
@@ -20,296 +16,393 @@ import nmmo
 from neural.policy import Recurrent
 from scripted import baselines
 
+
+from copy import deepcopy
+import os
+
+import numpy as np
+import torch
+
+import ray
+from ray import rllib
+
+import nmmo
+
+import rllib_wrapper as wrapper
+
+
 class RLlibPolicy(RecurrentNetwork, nn.Module):
-   '''Wrapper class for using our baseline models with RLlib'''
-   def __init__(self, *args, **kwargs):
-      self.config = kwargs.pop('config')
-      super().__init__(*args, **kwargs)
-      nn.Module.__init__(self)
+    '''Wrapper class for using our baseline models with RLlib'''
+    def __init__(self, *args, **kwargs):
+        self.config = kwargs.pop('config')
+        super().__init__(*args, **kwargs)
+        nn.Module.__init__(self)
 
-      #self.space  = actionSpace(self.config).spaces
-      self.model  = Recurrent(self.config)
+        #self.space  = actionSpace(self.config).spaces
+        self.model  = Recurrent(self.config)
 
-   #Initial hidden state for RLlib Trainer
-   def get_initial_state(self):
-      return [self.model.valueF.weight.new(1, self.config.HIDDEN).zero_(),
-              self.model.valueF.weight.new(1, self.config.HIDDEN).zero_()]
+    #Initial hidden state for RLlib Trainer
+    def get_initial_state(self):
+        return [self.model.valueF.weight.new(1, self.config.HIDDEN).zero_(),
+                self.model.valueF.weight.new(1, self.config.HIDDEN).zero_()]
 
-   def forward(self, input_dict, state, seq_lens):
-      logitDict, state = self.model(input_dict['obs'], state, seq_lens)
+    def forward(self, input_dict, state, seq_lens):
+        logitDict, state = self.model(input_dict['obs'], state, seq_lens)
 
-      logits = []
-      #Flatten structured logits for RLlib
-      #TODO: better to use the space directly here in case of missing keys
-      for atnKey, atn in sorted(logitDict.items()):
-         for argKey, arg in sorted(atn.items()):
-            logits.append(arg)
+        logits = []
+        #Flatten structured logits for RLlib
+        #TODO: better to use the space directly here in case of missing keys
+        for atnKey, atn in sorted(logitDict.items()):
+            for argKey, arg in sorted(atn.items()):
+                logits.append(arg)
 
-      return torch.cat(logits, dim=1), state
+        return torch.cat(logits, dim=1), state
 
-   def value_function(self):
-      return self.model.value
+    def value_function(self):
+        return self.model.value
 
-   def attention(self):
-      return self.model.attn
+    def attention(self):
+        return self.model.attn
 
 
 class RLlibEnv(nmmo.Env, rllib.MultiAgentEnv):
-   '''Wrapper class for using Neural MMO with RLlib'''
-   def __init__(self, config):
-      self.config = config['config']
-      super().__init__(self.config)
+    '''Wrapper class for using Neural MMO with RLlib'''
+    def __init__(self, config):
+        self.config = config['config']
+        super().__init__(self.config)
 
-   def render(self):
-      #Patch for RLlib dupe rendering bug
-      if not self.config.RENDER:
-         return
+    def render(self):
+        #Patch for RLlib dupe rendering bug
+        if not self.config.RENDER:
+            return
 
-      super().render()
+        super().render()
 
-   def step(self, decisions):
-      obs, rewards, dones, infos = super().step(decisions)
-      config = self.config
-      ts = config.TEAM_SPIRIT
-      
-      if config.COOPERATIVE:
-          #Union of task rewards across population
-          team_rewards = defaultdict(lambda: defaultdict(int))
-          populations = {}
-          for entID, info in infos.items():
-              pop = info.pop('population')
-              populations[entID] = pop
-              team = team_rewards[pop]
-              for task, reward in info.items():
-                  team[task] = max(team[task], reward)
+    def step(self, decisions):
+        obs, rewards, dones, infos = super().step(decisions)
+        config = self.config
+        ts = config.TEAM_SPIRIT
 
-          #Team spirit interpolated between agent and team summed task rewards
-          for entID, reward in rewards.items():
-              pop = populations[entID]
-              rewards[entID] = ts*sum(team_rewards[pop].values()) + (1-ts)*reward
+        if config.COOPERATIVE:
+            #Union of task rewards across population
+            team_rewards = defaultdict(lambda: defaultdict(int))
+            populations = {}
+            for entID, info in infos.items():
+                pop = info.pop('population')
+                populations[entID] = pop
+                team = team_rewards[pop]
+                for task, reward in info.items():
+                    team[task] = max(team[task], reward)
 
-      dones['__all__'] = False
-      test = config.EVALUATE or config.RENDER
-      
-      if config.EVALUATE:
-         horizon = config.EVALUATION_HORIZON
-      else:
-         horizon = config.TRAIN_HORIZON
+            #Team spirit interpolated between agent and team summed task rewards
+            for entID, reward in rewards.items():
+                pop = populations[entID]
+                rewards[entID] = ts*sum(team_rewards[pop].values()) + (1-ts)*reward
 
-      population  = len(self.realm.players) == 0
-      hit_horizon = self.realm.tick >= horizon
-      
-      if not config.RENDER and (hit_horizon or population):
-         dones['__all__'] = True
+        dones['__all__'] = False
+        test = config.EVALUATE or config.RENDER
 
-      return obs, rewards, dones, infos
+        if config.EVALUATE:
+            horizon = config.EVALUATION_HORIZON
+        else:
+            horizon = config.TRAIN_HORIZON
+
+        population  = len(self.realm.players) == 0
+        hit_horizon = self.realm.tick >= horizon
+
+        if not config.RENDER and (hit_horizon or population):
+            dones['__all__'] = True
+
+        return obs, rewards, dones, infos
 
 class RLlibOverlayRegistry(nmmo.OverlayRegistry):
-   '''Host class for RLlib Map overlays'''
-   def __init__(self, realm):
-      super().__init__(realm.config, realm)
+    '''Host class for RLlib Map overlays'''
+    def __init__(self, realm):
+        super().__init__(realm.config, realm)
 
-      self.overlays['values']       = Values
-      self.overlays['attention']    = Attention
-      self.overlays['tileValues']   = TileValues
-      self.overlays['entityValues'] = EntityValues
+        self.overlays['values']       = Values
+        self.overlays['attention']    = Attention
+        self.overlays['tileValues']   = TileValues
+        self.overlays['entityValues'] = EntityValues
 
 class RLlibOverlay(nmmo.Overlay):
-   '''RLlib Map overlay wrapper'''
-   def __init__(self, config, realm, trainer, model):
-      super().__init__(config, realm)
-      self.trainer = trainer
-      self.model   = model
+    '''RLlib Map overlay wrapper'''
+    def __init__(self, config, realm, trainer, model):
+        super().__init__(config, realm)
+        self.trainer = trainer
+        self.model   = model
 
 class Attention(RLlibOverlay):
-   def register(self, obs):
-      '''Computes local attentional maps with respect to each agent'''
-      tiles      = self.realm.realm.map.tiles
-      players    = self.realm.realm.players
+    def register(self, obs):
+        '''Computes local attentional maps with respect to each agent'''
+        tiles      = self.realm.realm.map.tiles
+        players    = self.realm.realm.players
 
-      attentions = defaultdict(list)
-      for idx, playerID in enumerate(obs):
-         if playerID not in players:
-            continue
-         player = players[playerID]
-         r, c   = player.pos
+        attentions = defaultdict(list)
+        for idx, playerID in enumerate(obs):
+            if playerID not in players:
+                continue
+            player = players[playerID]
+            r, c   = player.pos
 
-         rad     = self.config.NSTIM
-         obTiles = self.realm.realm.map.tiles[r-rad:r+rad+1, c-rad:c+rad+1].ravel()
+            rad     = self.config.NSTIM
+            obTiles = self.realm.realm.map.tiles[r-rad:r+rad+1, c-rad:c+rad+1].ravel()
 
-         for tile, a in zip(obTiles, self.model.attention()[idx]):
-            attentions[tile].append(float(a))
+            for tile, a in zip(obTiles, self.model.attention()[idx]):
+                attentions[tile].append(float(a))
 
-      sz    = self.config.TERRAIN_SIZE
-      data  = np.zeros((sz, sz))
-      for r, tList in enumerate(tiles):
-         for c, tile in enumerate(tList):
-            if tile not in attentions:
-               continue
-            data[r, c] = np.mean(attentions[tile])
+        sz    = self.config.TERRAIN_SIZE
+        data  = np.zeros((sz, sz))
+        for r, tList in enumerate(tiles):
+            for c, tile in enumerate(tList):
+                if tile not in attentions:
+                    continue
+                data[r, c] = np.mean(attentions[tile])
 
-      colorized = nmmo.overlay.twoTone(data)
-      self.realm.register(colorized)
+        colorized = nmmo.overlay.twoTone(data)
+        self.realm.register(colorized)
 
 class Values(RLlibOverlay):
-   def update(self, obs):
-      '''Computes a local value function by painting tiles as agents
+    def update(self, obs):
+        '''Computes a local value function by painting tiles as agents
       walk over them. This is fast and does not require additional
       network forward passes'''
-      players = self.realm.realm.players
-      for idx, playerID in enumerate(obs):
-         if playerID not in players:
-            continue
-         r, c = players[playerID].base.pos
-         self.values[r, c] = float(self.model.value_function()[idx])
+        players = self.realm.realm.players
+        for idx, playerID in enumerate(obs):
+            if playerID not in players:
+                continue
+            r, c = players[playerID].base.pos
+            self.values[r, c] = float(self.model.value_function()[idx])
 
-   def register(self, obs):
-      colorized = nmmo.overlay.twoTone(self.values[:, :])
-      self.realm.register(colorized)
+    def register(self, obs):
+        colorized = nmmo.overlay.twoTone(self.values[:, :])
+        self.realm.register(colorized)
 
 def zeroOb(ob, key):
-   for k in ob[key]:
-      ob[key][k] *= 0
+    for k in ob[key]:
+        ob[key][k] *= 0
 
 class GlobalValues(RLlibOverlay):
-   '''Abstract base for global value functions'''
-   def init(self, zeroKey):
-      if self.trainer is None:
-         return
+    '''Abstract base for global value functions'''
+    def init(self, zeroKey):
+        if self.trainer is None:
+            return
 
-      print('Computing value map...')
-      model     = self.trainer.get_policy('policy_0').model
-      obs, ents = self.realm.dense()
-      values    = 0 * self.values
+        print('Computing value map...')
+        model     = self.trainer.get_policy('policy_0').model
+        obs, ents = self.realm.dense()
+        values    = 0 * self.values
 
-      #Compute actions to populate model value function
-      BATCH_SIZE = 128
-      batch = {}
-      final = list(obs.keys())[-1]
-      for agentID in tqdm(obs):
-         ob             = obs[agentID]
-         batch[agentID] = ob
-         zeroOb(ob, zeroKey)
-         if len(batch) == BATCH_SIZE or agentID == final:
-            self.trainer.compute_actions(batch, state={}, policy_id='policy_0')
-            for idx, agentID in enumerate(batch):
-               r, c         = ents[agentID].base.pos
-               values[r, c] = float(self.model.value_function()[idx])
-            batch = {}
+        #Compute actions to populate model value function
+        BATCH_SIZE = 128
+        batch = {}
+        final = list(obs.keys())[-1]
+        for agentID in tqdm(obs):
+            ob             = obs[agentID]
+            batch[agentID] = ob
+            zeroOb(ob, zeroKey)
+            if len(batch) == BATCH_SIZE or agentID == final:
+                self.trainer.compute_actions(batch, state={}, policy_id='policy_0')
+                for idx, agentID in enumerate(batch):
+                    r, c         = ents[agentID].base.pos
+                    values[r, c] = float(self.model.value_function()[idx])
+                batch = {}
 
-      print('Value map computed')
-      self.colorized = nmmo.overlay.twoTone(values)
+        print('Value map computed')
+        self.colorized = nmmo.overlay.twoTone(values)
 
-   def register(self, obs):
-      print('Computing Global Values. This requires one NN pass per tile')
-      self.init()
+    def register(self, obs):
+        print('Computing Global Values. This requires one NN pass per tile')
+        self.init()
 
-      self.realm.register(self.colorized)
+        self.realm.register(self.colorized)
 
 class TileValues(GlobalValues):
-   def init(self, zeroKey='Entity'):
-      '''Compute a global value function map excluding other agents. This
+    def init(self, zeroKey='Entity'):
+        '''Compute a global value function map excluding other agents. This
       requires a forward pass for every tile and will be slow on large maps'''
-      super().init(zeroKey)
+        super().init(zeroKey)
 
 class EntityValues(GlobalValues):
-   def init(self, zeroKey='Tile'):
-      '''Compute a global value function map excluding tiles. This
+    def init(self, zeroKey='Tile'):
+        '''Compute a global value function map excluding tiles. This
       requires a forward pass for every tile and will be slow on large maps'''
-      super().init(zeroKey)
+        super().init(zeroKey)
 
 
 class Trainer:
-   def __init__(self, config, env=None, logger_creator=None):
-      super().__init__(config, env, logger_creator)
-      self.env_config = config['env_config']['config']
+    def __init__(self, config, env=None, logger_creator=None):
+        super().__init__(config, env, logger_creator)
+        self.env_config = config['env_config']['config']
 
-      agents = self.env_config.EVAL_AGENTS
+        agents = self.env_config.EVAL_AGENTS
 
-      err = 'Meander not in EVAL_AGENTS. Specify another agent to anchor to SR=0'
-      assert baselines.Meander in agents, err
-      self.sr = nmmo.OpenSkillRating(agents, baselines.Combat)
+        err = 'Meander not in EVAL_AGENTS. Specify another agent to anchor to SR=0'
+        assert baselines.Meander in agents, err
+        self.sr = nmmo.OpenSkillRating(agents, baselines.Combat)
 
-   @classmethod
-   def name(cls):
-      return cls.__bases__[0].__name__
+    @classmethod
+    def name(cls):
+        return cls.__bases__[0].__name__
 
-   def post_mean(self, stats):
-      for key, vals in stats.items():
-          if type(vals) == list:
-              stats[key] = np.mean(vals)
+    def post_mean(self, stats):
+        for key, vals in stats.items():
+            if type(vals) == list:
+                stats[key] = np.mean(vals)
 
-   def train(self):
-      stats = super().train()
-      self.post_mean(stats['custom_metrics'])
-      return stats
+    def train(self):
+        stats = super().train()
+        self.post_mean(stats['custom_metrics'])
+        return stats
 
-   def evaluate(self):
-      stat_dict = super().evaluate()
-      stats = stat_dict['evaluation']['custom_metrics']
+    def evaluate(self):
+        stat_dict = super().evaluate()
+        stats = stat_dict['evaluation']['custom_metrics']
 
-      if __debug__:
-         err = 'Missing evaluation key. Patch RLlib as per the installation guide'
-         assert 'Raw_Policy_IDs' in stats, err
+        if __debug__:
+            err = 'Missing evaluation key. Patch RLlib as per the installation guide'
+            assert 'Raw_Policy_IDs' in stats, err
 
-      policy_ids   = stats.pop('Raw_Policy_IDs')
-      task_rewards = stats.pop('Raw_Task_Rewards')
+        policy_ids   = stats.pop('Raw_Policy_IDs')
+        task_rewards = stats.pop('Raw_Task_Rewards')
 
-      for ids, scores in zip(policy_ids, task_rewards):
-          ratings = self.sr.update(policy_ids=ids, scores=scores)
+        for ids, scores in zip(policy_ids, task_rewards):
+            ratings = self.sr.update(policy_ids=ids, scores=scores)
 
-          for pop, (agent, rating) in enumerate(ratings.items()):
-              key = f'SR_{agent.__name__}_{pop}'
+            for pop, (agent, rating) in enumerate(ratings.items()):
+                key = f'SR_{agent.__name__}_{pop}'
 
-              if key not in stats:
-                  stats[key] = []
- 
-              stats[key] = rating.mu
-        
-      return stat_dict
+                if key not in stats:
+                    stats[key] = []
+
+                stats[key] = rating.mu
+
+        return stat_dict
 
 
 def PPO(config):
-   class PPO(Trainer, rllib.agents.ppo.ppo.PPOTrainer): pass
-   extra_config = {'sgd_minibatch_size': config.SGD_MINIBATCH_SIZE}
-   return PPO, extra_config
+    class PPO(Trainer, rllib.agents.ppo.ppo.PPOTrainer): pass
+    extra_config = {'sgd_minibatch_size': config.SGD_MINIBATCH_SIZE}
+    return PPO, extra_config
 
 def APPO(config):
-   class APPO(Trainer, rllib.agents.ppo.appo.APPOTrainer): pass
-   return APPO, {}
+    class APPO(Trainer, rllib.agents.ppo.appo.APPOTrainer): pass
+    return APPO, {}
 
 def Impala(config):
-   class Impala(Trainer, rllib.agents.impala.impala.ImpalaTrainer): pass
-   return Impala, {}
+    class Impala(Trainer, rllib.agents.impala.impala.ImpalaTrainer): pass
+    return Impala, {}
 
 ###############################################################################
 ### Logging
 class RLlibLogCallbacks(DefaultCallbacks):
-   def on_episode_end(self, *, worker, base_env, policies, episode, **kwargs):
-      assert len(base_env.envs) == 1, 'One env per worker'
-      env    = base_env.envs[0]
+    def on_episode_end(self, *, worker, base_env, policies, episode, **kwargs):
+        assert len(base_env.envs) == 1, 'One env per worker'
+        env    = base_env.envs[0]
 
-      inv_map = {agent.policyID: agent for agent in env.config.AGENTS}
+        inv_map = {agent.policyID: agent for agent in env.config.AGENTS}
 
-      stats      = env.terminal()['Stats']
-      policy_ids = stats.pop('PolicyID')
- 
-      for key, vals in stats.items():
-         policy_stat = defaultdict(list)
+        stats      = env.terminal()['Stats']
+        policy_ids = stats.pop('PolicyID')
 
-         # Per-population metrics
-         for policy_id, v in zip(policy_ids, vals):
-             policy_stat[policy_id].append(v)
+        for key, vals in stats.items():
+            policy_stat = defaultdict(list)
 
-         for policy_id, vals in policy_stat.items():
-             policy = inv_map[policy_id].__name__
+            # Per-population metrics
+            for policy_id, v in zip(policy_ids, vals):
+                policy_stat[policy_id].append(v)
 
-             k = f'{policy}_{policy_id}_{key}'
-             episode.custom_metrics[k] = np.mean(vals)
+            for policy_id, vals in policy_stat.items():
+                policy = inv_map[policy_id].__name__
 
-      if not env.config.EVALUATE:
-         return 
+                k = f'{policy}_{policy_id}_{key}'
+                episode.custom_metrics[k] = np.mean(vals)
 
-      episode.custom_metrics['Raw_Policy_IDs']   = policy_ids
-      episode.custom_metrics['Raw_Task_Rewards'] = stats['Task_Reward']
+        if not env.config.EVALUATE:
+            return
 
+        episode.custom_metrics['Raw_Policy_IDs']   = policy_ids
+        episode.custom_metrics['Raw_Task_Rewards'] = stats['Task_Reward']
+
+
+def build_rllib_config(config, rllib_env, init_ray=True):
+   #Round and round the num_threads flags go
+   #Which are needed nobody knows!
+   torch.set_num_threads(1)
+   os.environ['MKL_NUM_THREADS'] = '1'
+   os.environ['OMP_NUM_THREADS'] = '1'
+   os.environ['NUMEXPR_NUM_THREADS'] = '1'
+
+   if init_ray:
+      ray.init(local_mode=config.LOCAL_MODE)
+
+   #Register custom env and policies
+   ray.tune.registry.register_env("Neural_MMO",
+                                  lambda config: rllib_env(config))
+
+   rllib.models.ModelCatalog.register_custom_model('godsword',
+                                                   wrapper.RLlibPolicy)
+
+   mapPolicy = lambda agentID: 'policy_{}'.format(agentID % config.NPOLICIES)
+
+   policies = {}
+   env = nmmo.Env(config)
+   for i in range(config.NPOLICIES):
+       params = {
+           "agent_id": i,
+           "obs_space_dict": env.observation_space(i),
+           "act_space_dict": env.action_space(i)
+       }
+       key = mapPolicy(i)
+       policies[key] = (None, env.observation_space(i), env.action_space(i),
+                        params)
+
+   #Evaluation config
+   eval_config = deepcopy(config)
+   eval_config.EVALUATE = True
+   eval_config.AGENTS = eval_config.EVAL_AGENTS
+
+   #Create rllib config
+   rllib_config = {
+       'num_workers': config.NUM_WORKERS,
+       'num_gpus_per_worker': config.NUM_GPUS_PER_WORKER,
+       'num_gpus': config.NUM_GPUS,
+       'num_envs_per_worker': 1,
+       'simple_optimizer': True,
+       'train_batch_size': config.TRAIN_BATCH_SIZE,
+       'rollout_fragment_length': config.ROLLOUT_FRAGMENT_LENGTH,
+       'num_sgd_iter': config.NUM_SGD_ITER,
+       'framework': 'torch',
+       'horizon': np.inf,
+       'soft_horizon': False,
+       'no_done_at_end': False,
+       'env': 'Neural_MMO',
+       'env_config': {
+           'config': config
+       },
+       'evaluation_config': {
+           'env_config': {
+               'config': eval_config
+           },
+       },
+       'multiagent': {
+           'policies': policies,
+           'policy_mapping_fn': mapPolicy,
+           'count_steps_by': 'agent_steps'
+       },
+       'model': {
+           'custom_model': 'godsword',
+           'custom_model_config': {
+               'config': config
+           },
+           'max_seq_len': config.LSTM_BPTT_HORIZON
+       },
+       'render_env': config.RENDER,
+       'callbacks': wrapper.RLlibLogCallbacks,
+       'evaluation_interval': config.EVALUATION_INTERVAL,
+       'evaluation_num_episodes': config.EVALUATION_NUM_EPISODES,
+       'evaluation_num_workers': config.EVALUATION_NUM_WORKERS,
+       'evaluation_parallel_to_training': config.EVALUATION_PARALLEL,
+   }
+
+   return rllib_config
