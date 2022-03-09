@@ -1,5 +1,6 @@
 from nmmo.core.agent import Agent
 
+
 class NeuralAgent(Agent):
     def __init__(self, config, idx, *args, **kwargs):
         super().__init__(config, idx)
